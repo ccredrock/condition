@@ -2,6 +2,9 @@
 %%% @author ccredrock@gmail.com
 %%% @copyright 2018 redrock
 %%% @doc condition
+%%%      only_hit(<<"`a` > 5 | `b` > 6">>)
+%%%      only_eval(#{`d` => `a` + `b`}>>)
+%%%      only_eval(<<"`a` > 5 | `b` > 6" & #{`d` => `a` + `b`}>>)
 %%% @end
 %%%-------------------------------------------------------------------
 -module(condition).
@@ -11,7 +14,9 @@
 -export([sync_conds/2,
          add_cond/2,
          only_hit/3,
-         update_hit/3]).
+         update_hit/3,
+         only_eval/3,
+         update_eval/3]).
 
 -export([valid_cond/1,
          check_cond/1,
@@ -53,21 +58,41 @@ add_cond(Mod, Cond) ->
         {_, Reason} -> {error, Reason}
     end.
 
--spec only_hit(Mod::atom(), Cond::binary(), Map::#{}) -> boolean().
-only_hit(Mod, Cond, Map) ->
-    (catch ?HASH_MOD(Mod, Cond):hit(Cond, Map)) =:= true.
+-spec only_hit(Mod::atom(), Cond::binary(), Data::#{}) -> boolean().
+only_hit(Mod, Cond, Data) ->
+    (catch ?HASH_MOD(Mod, Cond):hit(Cond, Data)) =:= true.
 
--spec update_hit(Mod::atom(), Cond::binary(), Map::#{}) -> boolean().
-update_hit(Mod, Cond, Map) ->
+-spec update_hit(Mod::atom(), Cond::binary(), Data::#{}) -> boolean().
+update_hit(Mod, Cond, Data) ->
     Mod1 = ?HASH_MOD(Mod, Cond),
-    case {code:is_loaded(Mod), catch Mod1:hit(Cond, Map)} of
+    case {code:is_loaded(Mod), catch Mod1:hit(Cond, Data)} of
         {true, true} -> true;
-        {true, {_, _}} -> false;
-        _ ->
+        {false, _} ->
             case add_cond(Mod, Cond) of
-                ok -> only_hit(Mod, Cond, Map);
-                {error, Reason} -> Reason
-            end
+                ok -> only_hit(Mod, Cond, Data);
+                {error, _} -> false
+            end;
+        _ -> false
+    end.
+
+-spec only_eval(Mod::atom(), Cond::binary(), Data::#{}) -> undefined | #{}.
+only_eval(Mod, Cond, Data) ->
+    case catch ?HASH_MOD(Mod, Cond):hit(Cond, Data) of
+        #{} = V -> V;
+        _ -> undefined
+    end.
+
+-spec update_eval(Mod::atom(), Cond::binary(), Data::#{}) -> undefined | #{}.
+update_eval(Mod, Cond, Data) ->
+    Mod1 = ?HASH_MOD(Mod, Cond),
+    case {code:is_loaded(Mod), catch Mod1:hit(Cond, Data)} of
+        {true,  #{} = V} -> V;
+        {false, _} ->
+            case add_cond(Mod, Cond) of
+                ok -> only_eval(Mod, Cond, Data);
+                {error, _} -> undefined
+            end;
+        _ -> undefined
     end.
 
 %%------------------------------------------------------------------------------
@@ -80,28 +105,40 @@ valid_cond(Cond) ->
 
 -spec check_cond(Cond::binary()) -> {ok, binary()} | {error, any()}.
 check_cond(<<_/binary>> = Cond) ->
-    Cond1 = convert_expr(Cond),
-    Cond2 = re:replace(Cond1, <<"`([a-z,A-Z]\+)`">>, <<"maps:get(<<\"\\1\">>, M, 0)">>, [{return, binary}, global]),
+    Cond1 = convert_key(convert_op(Cond), check),
     try
-        {ok, Scanned, _} = erl_scan:string(binary_to_list(<<"M = #{}, ", Cond2/binary, ".">>)),
-        {ok, Parsed} = erl_parse:parse_exprs(Scanned),
+        {ok, Parsed} = parse_exprs(<<"M = #{}, ", Cond1/binary>>),
         {value, _, _} = erl_eval:exprs(Parsed, []),
-        {ok, Cond2}
+        {ok, Cond1}
     catch
-        _:R -> {error, {Cond2, R}}
+        _:R -> {error, {Cond1, R}}
     end.
+
+%% @private
+parse_exprs(Cond) ->
+    {ok, Scanned, _} = erl_scan:string(binary_to_list(<<Cond/binary, ".">>)),
+    erl_parse:parse_exprs(Scanned).
 
 %% @private
 %% args: "`a` = \"5a\" & `b` ~="
 %% return: "`a` =:= \"5a\" andalso `b` =="
-convert_expr(Cond) ->
+convert_op(Cond) ->
     List = [{<<":">>, <<>>},
             {<<"&">>, <<" andalso ">>},
             {<<"\\|">>, <<" orelse ">>},
-            {<<"([^!~<>])=">>, <<"\\1=:=">>},
+            {<<"([^!~<>])=(^>)">>, <<"\\1=:=\\2">>},
             {<<"!=">>, <<"/=">>},
             {<<"~=">>, <<"==">>},
             {<<"<=">>, <<"=<">>}],
+    lists:foldl(fun({Src, Dst}, Acc) -> re:replace(Acc, Src, Dst, [{return, binary}, global]) end, Cond, List).
+
+convert_key(Cond, check) ->
+    List = [{<<"`([a-z,A-Z]\+)` * =>">>, <<"<<\"\\1\">> =>">>},
+            {<<"`([a-z,A-Z]\+)`">>, <<"maps:get(<<\"\\1\">>, M, 0)">>}],
+    lists:foldl(fun({Src, Dst}, Acc) -> re:replace(Acc, Src, Dst, [{return, binary}, global]) end, Cond, List);
+convert_key(Cond, run) ->
+    List = [{<<"`([a-z,A-Z]\+)` * =>">>, <<"<<\"\\1\">> =>">>},
+            {<<"`([a-z,A-Z]\+)`">>, <<"maps:get(<<\"\\1\">>, M)">>}],
     lists:foldl(fun({Src, Dst}, Acc) -> re:replace(Acc, Src, Dst, [{return, binary}, global]) end, Cond, List).
 
 mod_conds(Mod) ->
@@ -227,9 +264,7 @@ form_binary(Bin) ->
 
 %% @private
 form_exprs(Cond) ->
-    Cond1 = convert_expr(Cond),
-    Cond2 = re:replace(Cond1, <<"`([a-z,A-Z]\+)`">>, <<"maps:get(<<\"\\1\">>, M)">>, [{return, binary}, global]),
-    {ok, Scanned, _} = erl_scan:string(binary_to_list(<<Cond2/binary, ".">>)),
-    {ok, Parsed} = erl_parse:parse_exprs(Scanned),
+    Cond1 = convert_key(convert_op(Cond), check),
+    {ok, Parsed} = parse_exprs(Cond1),
     Parsed.
 
