@@ -14,7 +14,12 @@
 %%------------------------------------------------------------------------------
 -spec start_link() -> supervisor:startlink_ret().
 start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    {ok, Sup} = supervisor:start_link({local, ?MODULE}, ?MODULE, []),
+    {ok, _} = supervisor:start_child(?MODULE, {condition,
+                                               {condition, start_link, []},
+                                               transient, infinity, worker,
+                                               [condition]}),
+    {ok, Sup}.
 
 -spec init([]) -> supervisor:init().
 init([]) ->
