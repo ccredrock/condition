@@ -29,12 +29,12 @@
 %%------------------------------------------------------------------------------
 %% define
 %%------------------------------------------------------------------------------
--record(state, {conds = #{}}).
-
 -define(MAX_HASH_NUM, 100).
 -define(HASH_ID(C), erlang:phash2(C, ?MAX_HASH_NUM)).
 -define(ID_MOD(M, I), (list_to_atom("0cond_" ++ atom_to_list(M) ++ integer_to_list(I)))).
 -define(HASH_MOD(M, C), ?ID_MOD(M, ?HASH_ID(C))).
+
+-record(state, {conds = #{}}).
 
 %%------------------------------------------------------------------------------
 %% interface
@@ -70,9 +70,13 @@ update_hit(Mod, Cond, Data) ->
         {false, _} ->
             case add_cond(Mod, Cond) of
                 ok -> only_hit(Mod, Cond, Data);
-                {error, _} -> false
+                {error, _R} ->
+            io:format("~p~n", [_R]),
+                    false
             end;
-        _ -> false
+        _R ->
+            io:format("~p~n", [_R]),
+            false
     end.
 
 -spec only_eval(Mod::atom(), Cond::binary(), Data::#{}) -> undefined | #{}.
@@ -126,7 +130,7 @@ convert_op(Cond) ->
     List = [{<<":">>, <<>>},
             {<<"&">>, <<" andalso ">>},
             {<<"\\|">>, <<" orelse ">>},
-            {<<"([^!~<>])=(^>)">>, <<"\\1=:=\\2">>},
+            {<<"([^!~<>])=([^>])">>, <<"\\1=:=\\2">>},
             {<<"!=">>, <<"/=">>},
             {<<"~=">>, <<"==">>},
             {<<"<=">>, <<"=<">>}],
